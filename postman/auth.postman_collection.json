@@ -1,0 +1,43 @@
+{
+  "info": {
+    "name": "Document Sharing API - Day 1 Auth",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": { "method": "GET", "url": "{{base_url}}/health" }
+    },
+    {
+      "name": "Register user",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"alex@example.com\",\n  \"full_name\": \"Alex Morgan\",\n  \"password\": \"correct-horse-123\"\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{base_url}}/api/v1/auth/register"
+      }
+    },
+    {
+      "name": "Login",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["if (pm.response.code === 200) { pm.collectionVariables.set('token', pm.response.json().access_token); }"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"alex@example.com\",\n  \"password\": \"correct-horse-123\"\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{base_url}}/api/v1/auth/login"
+      }
+    },
+    {
+      "name": "Current user (protected)",
+      "request": {
+        "method": "GET",
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }] },
+        "url": "{{base_url}}/api/v1/auth/me"
+      }
+    }
+  ]
+}
