@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.core.roles import SharePermission
+
 
 class DocumentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -20,3 +22,14 @@ class DocumentPage(BaseModel):
     page: int
     page_size: int
     pages: int
+
+
+class DocumentShareCreate(BaseModel):
+    email: str
+    permission: SharePermission = SharePermission.READ
+
+
+class DocumentShareRead(BaseModel):
+    user_id: int
+    email: str
+    permission: SharePermission

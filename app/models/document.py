@@ -20,3 +20,17 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     owner = relationship("User", back_populates="documents")
+    shares = relationship("DocumentShare", back_populates="document", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class DocumentShare(Base):
+    __tablename__ = "document_shares"
+    __table_args__ = (UniqueConstraint("document_id", "user_id", name="uq_document_share_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    permission: Mapped[str] = mapped_column(String(20), nullable=False, default="read")
+
+    document = relationship("Document", back_populates="shares")
+    user = relationship("User")

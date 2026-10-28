@@ -5,14 +5,15 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
+from app.core.roles import Role, SharePermission
 from app.db.session import get_db
-from app.models import Document, User
-from app.schemas.document import DocumentPage, DocumentRead
+from app.models import Document, DocumentShare, User
+from app.schemas.document import DocumentPage, DocumentRead, DocumentShareCreate, DocumentShareRead
 from app.services.document_storage import ALLOWED_TYPES, resolve_stored_file, store_upload
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def _save_document_records(files: list[dict], owner: User, db: Session) -> list[
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.USER)),
     db: Session = Depends(get_db),
 ):
     stored = await store_upload(file)
@@ -57,7 +58,7 @@ async def upload_document(
 @router.post("/bulk", response_model=list[DocumentRead], status_code=status.HTTP_201_CREATED)
 async def upload_documents(
     files: list[UploadFile] = File(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.USER)),
     db: Session = Depends(get_db),
 ):
     if not files:
@@ -93,7 +94,9 @@ def list_documents(
 ):
     if uploaded_after and uploaded_before and uploaded_after > uploaded_before:
         raise HTTPException(status_code=422, detail="uploaded_after must be earlier than uploaded_before")
-    filters = [Document.owner_id == current_user.id]
+    filters = [or_(Document.owner_id == current_user.id, Document.shares.any(DocumentShare.user_id == current_user.id))]
+    if current_user.role in (Role.ADMIN.value, Role.MANAGER.value):
+        filters = [True]
     if search:
         escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         filters.append(Document.original_filename.ilike(f"%{escaped}%", escape="\\"))
@@ -126,8 +129,16 @@ def list_documents(
     return DocumentPage(items=items, total=total, page=page, page_size=page_size, pages=ceil(total / page_size))
 
 
-def _owned_document(document_id: int, owner_id: int, db: Session) -> Document:
-    document = db.scalar(select(Document).where(Document.id == document_id, Document.owner_id == owner_id))
+def _accessible_document(document_id: int, current_user: User, db: Session, *, download: bool = False) -> Document:
+    permitted = Document.owner_id == current_user.id
+    if current_user.role in (Role.ADMIN.value, Role.MANAGER.value):
+        permitted = True
+    else:
+        permissions = [SharePermission.DOWNLOAD.value] if download else [SharePermission.READ.value, SharePermission.DOWNLOAD.value]
+        permitted = or_(permitted, Document.shares.any(
+            (DocumentShare.user_id == current_user.id) & (DocumentShare.permission.in_(permissions))
+        ))
+    document = db.scalar(select(Document).where(Document.id == document_id, permitted))
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
@@ -139,7 +150,7 @@ def get_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return _owned_document(document_id, current_user.id, db)
+    return _accessible_document(document_id, current_user, db)
 
 
 @router.get("/{document_id}/download")
@@ -148,7 +159,7 @@ def download_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    document = _owned_document(document_id, current_user.id, db)
+    document = _accessible_document(document_id, current_user, db, download=True)
     path = resolve_stored_file(document.stored_filename)
     return FileResponse(path, media_type=document.media_type, filename=Path(document.original_filename).name, content_disposition_type="attachment")
 
@@ -159,7 +170,9 @@ def delete_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    document = _owned_document(document_id, current_user.id, db)
+    document = db.scalar(select(Document).where(Document.id == document_id)) if current_user.role == Role.ADMIN.value else db.scalar(select(Document).where(Document.id == document_id, Document.owner_id == current_user.id))
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
     try:
         path = resolve_stored_file(document.stored_filename)
     except HTTPException:
@@ -171,3 +184,57 @@ def delete_document(
             path.unlink(missing_ok=True)
         except OSError:
             logger.exception("Unable to remove stored document %s after database deletion", document.id)
+
+
+@router.put("/{document_id}/shares", response_model=DocumentShareRead, status_code=status.HTTP_200_OK)
+def share_document(
+    document_id: int,
+    payload: DocumentShareCreate,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.USER)),
+    db: Session = Depends(get_db),
+):
+    document = db.scalar(select(Document).where(Document.id == document_id))
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if current_user.role != Role.ADMIN.value and document.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    recipient = db.scalar(select(User).where(func.lower(User.email) == payload.email.lower()))
+    if recipient is None or recipient.id == document.owner_id:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    share = db.scalar(select(DocumentShare).where(DocumentShare.document_id == document.id, DocumentShare.user_id == recipient.id))
+    if share is None:
+        share = DocumentShare(document_id=document.id, user_id=recipient.id)
+        db.add(share)
+    share.permission = payload.permission.value
+    db.commit()
+    return DocumentShareRead(user_id=recipient.id, email=recipient.email, permission=payload.permission)
+
+
+@router.get("/{document_id}/shares", response_model=list[DocumentShareRead])
+def list_document_shares(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    document = db.scalar(select(Document).where(Document.id == document_id))
+    if document is None or (current_user.role != Role.ADMIN.value and document.owner_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    shares = db.scalars(select(DocumentShare).where(DocumentShare.document_id == document_id)).all()
+    return [DocumentShareRead(user_id=share.user.id, email=share.user.email, permission=share.permission) for share in shares]
+
+
+@router.delete("/{document_id}/shares/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_document_share(
+    document_id: int,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    document = db.scalar(select(Document).where(Document.id == document_id))
+    if document is None or (current_user.role != Role.ADMIN.value and document.owner_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    share = db.scalar(select(DocumentShare).where(DocumentShare.document_id == document_id, DocumentShare.user_id == user_id))
+    if share is None:
+        raise HTTPException(status_code=404, detail="Share not found")
+    db.delete(share)
+    db.commit()

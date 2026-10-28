@@ -97,3 +97,49 @@ def test_bulk_upload_validation_and_owner_isolation(client, monkeypatch):
         files={"file": ("large.txt", b"12345", "text/plain")},
     )
     assert too_large.status_code == 413
+
+
+def test_document_sharing_read_download_revoke_and_role_restrictions(client):
+    owner = _register(client, "owner@example.com")
+    recipient = _register(client, "recipient@example.com")
+    owner_auth = {"Authorization": f"Bearer {owner}"}
+    recipient_auth = {"Authorization": f"Bearer {recipient}"}
+    upload = client.post("/api/v1/documents", headers=owner_auth,
+                         files={"file": ("share.txt", b"shared bytes", "text/plain")})
+    assert upload.status_code == 201
+    document_id = upload.json()["id"]
+
+    assert client.get(f"/api/v1/documents/{document_id}", headers=recipient_auth).status_code == 404
+    shared = client.put(f"/api/v1/documents/{document_id}/shares", headers=owner_auth,
+                        json={"email": "recipient@example.com", "permission": "read"})
+    assert shared.status_code == 200
+    assert client.get(f"/api/v1/documents/{document_id}", headers=recipient_auth).status_code == 200
+    listing = client.get("/api/v1/documents", headers=recipient_auth)
+    assert listing.json()["total"] == 1
+    assert client.get(f"/api/v1/documents/{document_id}/download", headers=recipient_auth).status_code == 404
+    assert client.delete(f"/api/v1/documents/{document_id}", headers=recipient_auth).status_code == 404
+
+    assert client.put(f"/api/v1/documents/{document_id}/shares", headers=owner_auth,
+                      json={"email": "recipient@example.com", "permission": "download"}).status_code == 200
+    download = client.get(f"/api/v1/documents/{document_id}/download", headers=recipient_auth)
+    assert download.status_code == 200
+    assert download.content == b"shared bytes"
+    assert client.delete(f"/api/v1/documents/{document_id}/shares/2", headers=owner_auth).status_code == 204
+    assert client.get(f"/api/v1/documents/{document_id}", headers=recipient_auth).status_code == 404
+
+
+def test_viewer_cannot_upload(client, monkeypatch):
+    token = _register(client, "viewer@example.com")
+    from app.api.deps import get_current_user
+    from app.models import User
+
+    def viewer():
+        return User(id=1, email="viewer@example.com", full_name="Viewer", hashed_password="x", role="viewer")
+
+    client.app.dependency_overrides[get_current_user] = viewer
+    try:
+        response = client.post("/api/v1/documents", headers={"Authorization": f"Bearer {token}"},
+                               files={"file": ("notes.txt", b"text", "text/plain")})
+        assert response.status_code == 403
+    finally:
+        client.app.dependency_overrides.pop(get_current_user, None)

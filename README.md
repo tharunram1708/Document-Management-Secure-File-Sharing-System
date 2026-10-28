@@ -34,7 +34,13 @@ All document routes require a bearer access token. Uploaded bytes are stored out
 
 The `documents` table is created by the next Alembic migration. Docker Compose persists uploaded content in its `document_files` volume. Import `postman/auth.postman_collection.json` for the auth calls, and `postman/documents.postman_collection.json` for upload, list, download, and delete requests. Select a local file in the Postman form-data field before sending uploads.
 
-Registration normalizes email to lowercase, rejects duplicate addresses, and never returns a password hash. New accounts receive the `member` role; role assignment is intentionally not exposed through public registration. JWT lifetime is configurable with `ACCESS_TOKEN_EXPIRE_MINUTES` (default 30).
+Registration normalizes email to lowercase, rejects duplicate addresses, and never returns a password hash. New accounts receive the `user` role; role assignment is never exposed through public registration. JWT lifetime is configurable with `ACCESS_TOKEN_EXPIRE_MINUTES` (default 30).
+
+## Role based access and sharing (Day 3)
+
+Run `alembic upgrade head` to add document sharing and convert legacy `member` accounts to `user`. Roles are `admin`, `manager`, `user`, and `viewer`. Admins can manage all documents and assign roles; managers can read and download any document, and upload, share, or delete their own; users can upload and manage their own; viewers have read-only access to their own and shared documents. Owners can share with another registered user using `PUT /api/v1/documents/{id}/shares` with `{ "email": "reader@example.com", "permission": "read" }`; use `download` to also permit downloads. Shared users cannot modify or delete documents. Owners and admins can list shares and revoke them with `DELETE /api/v1/documents/{id}/shares/{user_id}`.
+
+The first admin must be provisioned by an operator after registration, for example with SQL: `UPDATE users SET role = 'admin' WHERE email = 'admin@example.com';`. Admins can then use `PATCH /api/v1/auth/users/{user_id}/role` with `{ "role": "manager" }` (or another valid role). Missing/invalid credentials return 401; authenticated users without a required role receive 403; inaccessible or unshared document IDs return 404.
 
 ## Postman checks
 
