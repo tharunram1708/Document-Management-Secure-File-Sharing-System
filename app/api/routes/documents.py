@@ -1,9 +1,11 @@
 import logging
+import hashlib
+import json
 from datetime import datetime
 from math import ceil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -15,6 +17,9 @@ from app.db.session import get_db
 from app.models import Document, DocumentShare, User
 from app.schemas.document import DocumentPage, DocumentRead, DocumentShareCreate, DocumentShareRead
 from app.services.document_storage import ALLOWED_TYPES, resolve_stored_file, store_upload
+from app.services.audit import record_audit
+from app.services.cache import get_json, invalidate_documents, set_json
+from app.services.notifications import notify_upload
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -34,6 +39,8 @@ def _save_document_records(files: list[dict], owner: User, db: Session) -> list[
     ]
     try:
         db.add_all(documents)
+        db.flush()
+        record_audit(db, "document.upload", actor_id=owner.id, resource_type="document", details={"document_ids": [item.id for item in documents], "filenames": [item.original_filename for item in documents]})
         db.commit()
         for document in documents:
             db.refresh(document)
@@ -47,16 +54,21 @@ def _save_document_records(files: list[dict], owner: User, db: Session) -> list[
 
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.USER)),
     db: Session = Depends(get_db),
 ):
     stored = await store_upload(file)
-    return _save_document_records([stored], current_user, db)[0]
+    document = _save_document_records([stored], current_user, db)[0]
+    invalidate_documents()
+    background_tasks.add_task(notify_upload, current_user.email, [document.original_filename])
+    return document
 
 
 @router.post("/bulk", response_model=list[DocumentRead], status_code=status.HTTP_201_CREATED)
 async def upload_documents(
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     current_user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.USER)),
     db: Session = Depends(get_db),
@@ -69,7 +81,10 @@ async def upload_documents(
     try:
         for upload in files:
             stored_files.append(await store_upload(upload))
-        return _save_document_records(stored_files, current_user, db)
+        documents = _save_document_records(stored_files, current_user, db)
+        invalidate_documents()
+        background_tasks.add_task(notify_upload, current_user.email, [document.original_filename for document in documents])
+        return documents
     except Exception:
         for upload in files:
             await upload.close()
@@ -112,6 +127,11 @@ def list_documents(
     if uploaded_before:
         filters.append(Document.created_at <= uploaded_before)
 
+    cache_params = {"user": current_user.id, "role": current_user.role, "page": page, "page_size": page_size, "search": search, "media_type": media_type, "extension": extension, "after": uploaded_after.isoformat() if uploaded_after else None, "before": uploaded_before.isoformat() if uploaded_before else None, "sort_by": sort_by, "sort_order": sort_order}
+    cache_key = "documents:v1:" + hashlib.sha256(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()
+    cached = get_json(cache_key)
+    if cached is not None:
+        return DocumentPage.model_validate(cached)
     total = db.scalar(select(func.count()).select_from(Document).where(*filters)) or 0
     sort_column = {
         "uploaded_at": Document.created_at,
@@ -126,7 +146,9 @@ def list_documents(
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
-    return DocumentPage(items=items, total=total, page=page, page_size=page_size, pages=ceil(total / page_size))
+    result = DocumentPage(items=items, total=total, page=page, page_size=page_size, pages=ceil(total / page_size))
+    set_json(cache_key, result.model_dump(mode="json"))
+    return result
 
 
 def _accessible_document(document_id: int, current_user: User, db: Session, *, download: bool = False) -> Document:
@@ -178,7 +200,9 @@ def delete_document(
     except HTTPException:
         path = None
     db.delete(document)
+    record_audit(db, "document.delete", actor_id=current_user.id, resource_type="document", resource_id=document.id, details={"filename": document.original_filename})
     db.commit()
+    invalidate_documents()
     if path is not None:
         try:
             path.unlink(missing_ok=True)
@@ -206,7 +230,9 @@ def share_document(
         share = DocumentShare(document_id=document.id, user_id=recipient.id)
         db.add(share)
     share.permission = payload.permission.value
+    record_audit(db, "document.share", actor_id=current_user.id, resource_type="document", resource_id=document.id, details={"recipient_id": recipient.id, "permission": payload.permission.value})
     db.commit()
+    invalidate_documents()
     return DocumentShareRead(user_id=recipient.id, email=recipient.email, permission=payload.permission)
 
 
@@ -237,4 +263,6 @@ def revoke_document_share(
     if share is None:
         raise HTTPException(status_code=404, detail="Share not found")
     db.delete(share)
+    record_audit(db, "document.share.revoke", actor_id=current_user.id, resource_type="document", resource_id=document.id, details={"recipient_id": user_id})
     db.commit()
+    invalidate_documents()

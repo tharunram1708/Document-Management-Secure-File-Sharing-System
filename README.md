@@ -42,6 +42,14 @@ Run `alembic upgrade head` to add document sharing and convert legacy `member` a
 
 The first admin must be provisioned by an operator after registration, for example with SQL: `UPDATE users SET role = 'admin' WHERE email = 'admin@example.com';`. Admins can then use `PATCH /api/v1/auth/users/{user_id}/role` with `{ "role": "manager" }` (or another valid role). Missing/invalid credentials return 401; authenticated users without a required role receive 403; inaccessible or unshared document IDs return 404.
 
+## Advanced backend features (Day 4)
+
+Run `alembic upgrade head` to create the `audit_logs` table. Mutations and login outcomes write audit events in the same database transaction as their related changes. SQLAlchemy sessions roll back if a request exits with an exception. Upload notifications run as FastAPI background tasks; `app/services/notifications.py` is the integration point for an email or event provider.
+
+Document list responses use a short-lived Redis cache keyed by user, role, and query parameters. Upload, deletion, sharing, and role changes invalidate cached lists. Configure `REDIS_URL` and `CACHE_TTL_SECONDS`; Redis is included in Docker Compose. When Redis is unavailable or omitted, caching is bypassed and login throttling uses a process-local fallback. Login requests are limited by `LOGIN_RATE_LIMIT` within `LOGIN_RATE_WINDOW_SECONDS` (defaults: 10 per 60 seconds).
+
+Errors use an `{ "error": { "code", "message", "details?", "request_id" } }` envelope. Request logs include method, path, status, duration, and request ID; responses return the ID in `X-Request-ID`. Avoid logging credentials or authorization headers.
+
 ## Postman checks
 
 Import the collection, then run Register user, Login, and Current user in order. Login saves the returned token to the collection variable. To verify protection, clear the `token` variable and run Current user; it should return 401. Re-registering the same email should return 409, and a wrong password should return 401.

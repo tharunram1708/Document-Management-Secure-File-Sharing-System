@@ -12,6 +12,10 @@ class Settings:
     document_storage_dir: Path = Path(os.getenv("DOCUMENT_STORAGE_DIR", "storage"))
     max_upload_size_bytes: int = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", str(10 * 1024 * 1024)))
     max_upload_batch_count: int = int(os.getenv("MAX_UPLOAD_BATCH_COUNT", "10"))
+    redis_url: str | None = os.getenv("REDIS_URL")
+    cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "30"))
+    login_rate_limit: int = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
+    login_rate_window_seconds: int = int(os.getenv("LOGIN_RATE_WINDOW_SECONDS", "60"))
     app_name: str = "Document Sharing API"
 
 
