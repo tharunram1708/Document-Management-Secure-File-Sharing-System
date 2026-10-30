@@ -4,9 +4,9 @@ services:
     environment:
       POSTGRES_DB: documents
       POSTGRES_USER: documents
-      POSTGRES_PASSWORD: documents
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +21,8 @@ services:
   api:
     build: .
     environment:
-      DATABASE_URL: postgresql+psycopg://documents:documents@db:5432/documents
-      SECRET_KEY: ${SECRET_KEY:-local-development-change-this-key}
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:?Set COMPOSE_DATABASE_URL in .env}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
       DOCUMENT_STORAGE_DIR: /code/storage
       MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-10485760}
@@ -32,7 +32,7 @@ services:
       LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
       LOGIN_RATE_WINDOW_SECONDS: ${LOGIN_RATE_WINDOW_SECONDS:-60}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - document_files:/code/storage
     depends_on:
@@ -40,6 +40,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
 volumes:
   postgres_data:

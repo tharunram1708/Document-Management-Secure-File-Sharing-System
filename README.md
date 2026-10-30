@@ -4,15 +4,18 @@ Authentication foundation built with FastAPI, PostgreSQL, SQLAlchemy 2, Alembic,
 
 ## Run with Docker
 
-1. Copy `.env.example` to `.env` and set `SECRET_KEY` to a long random value.
-2. Run `docker compose up --build`.
-3. Open `http://localhost:8000/docs` for Swagger UI or import `postman/auth.postman_collection.json` into Postman.
+1. Copy `.env.example` to `.env`.
+2. Generate a secret and a URL-safe database password, then put them in `.env` for `SECRET_KEY`, `POSTGRES_PASSWORD`, and `COMPOSE_DATABASE_URL`. For example, run `python -c "import secrets; print(secrets.token_urlsafe(48))"` twice and use one value for the app secret and one for the database password. The database password in `COMPOSE_DATABASE_URL` must match `POSTGRES_PASSWORD`.
+3. Run `docker compose up --build`.
+4. Open `http://localhost:8000/docs` for Swagger UI or import `postman/auth.postman_collection.json` into Postman.
+
+Compose requires explicit secrets, binds the API and database ports to localhost, waits for PostgreSQL health, and persists database and uploaded files in named volumes. The API container runs Alembic migrations before starting Uvicorn and runs as an unprivileged user. Redis is used for cache and rate-limit coordination.
 
 The API container applies Alembic migrations before starting. PostgreSQL is exposed on port 5432.
 
 ## Run locally
 
-Use Python 3.10 or newer. Install `requirements.txt`, set `DATABASE_URL` and `SECRET_KEY` from `.env.example`, run `alembic upgrade head`, then start the API with `uvicorn app.main:app --reload`. The default local database is SQLite; Docker Compose uses PostgreSQL.
+Use Python 3.10 or newer. Install `requirements.txt`, set `DATABASE_URL` and a generated `SECRET_KEY` in `.env`, run `alembic upgrade head`, then start the API with `uvicorn app.main:app --reload`. The default local database is SQLite; Docker Compose uses PostgreSQL. Never commit `.env`; `.env.example` contains placeholders only.
 
 ## Authentication flow
 
@@ -53,3 +56,27 @@ Errors use an `{ "error": { "code", "message", "details?", "request_id" } }` env
 ## Postman checks
 
 Import the collection, then run Register user, Login, and Current user in order. Login saves the returned token to the collection variable. To verify protection, clear the `token` variable and run Current user; it should return 401. Re-registering the same email should return 409, and a wrong password should return 401.
+
+
+## Testing and API contract (Day 5)
+
+Run the test suite with `python -m pytest -q`. The tests use an isolated in-memory SQLite database and temporary file storage. They cover registration/login, bearer-token protection, role restrictions, uploads and their validation, ownership and sharing, error responses, and the generated OpenAPI schema.
+
+Use `alembic upgrade head` to apply the full migration chain and `alembic current` to inspect the current revision. The latest revision creates audit logs. The API contract is available at `/openapi.json`; Swagger UI is at `/docs` and ReDoc at `/redoc`. Use `GET /health` for the container liveness check.
+
+## End-to-end API demonstration
+
+With the API running, register a user, log in, upload a UTF-8 text file, then list, download, and delete it. Replace the token and file path in these examples:
+
+```sh
+curl -X POST http://localhost:8000/api/v1/auth/register -H 'Content-Type: application/json' -d '{"email":"demo@example.com","full_name":"Demo User","password":"correct-horse-123"}'
+curl -X POST http://localhost:8000/api/v1/auth/login -H 'Content-Type: application/json' -d '{"email":"demo@example.com","password":"correct-horse-123"}'
+curl -X POST http://localhost:8000/api/v1/documents -H 'Authorization: Bearer TOKEN' -F 'file=@notes.txt;type=text/plain'
+curl http://localhost:8000/api/v1/documents -H 'Authorization: Bearer TOKEN'
+curl -OJ http://localhost:8000/api/v1/documents/1/download -H 'Authorization: Bearer TOKEN'
+curl -X DELETE http://localhost:8000/api/v1/documents/1 -H 'Authorization: Bearer TOKEN'
+```
+
+## Deployment preparation
+
+Use a unique high-entropy `SECRET_KEY` and strong database password, and provide production database/Redis endpoints through the deployment platform's secret manager. The Compose file is a local container setup; production deployment should use managed PostgreSQL/Redis, TLS termination, backups, and a controlled migration step.

@@ -1,4 +1,5 @@
 import os
+import secrets
 from pathlib import Path
 
 
@@ -6,7 +7,9 @@ class Settings:
     """Environment-backed application settings."""
 
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./documents.db")
-    secret_key: str = os.getenv("SECRET_KEY", "dev-only-change-this-secret-key-please")
+    # Generate an unguessable per-process key for local development when none is
+    # configured. Deployments should always set SECRET_KEY via a secret store.
+    secret_key: str = os.getenv("SECRET_KEY") or secrets.token_urlsafe(48)
     algorithm: str = "HS256"
     access_token_expire_minutes: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     document_storage_dir: Path = Path(os.getenv("DOCUMENT_STORAGE_DIR", "storage"))
